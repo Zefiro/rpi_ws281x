@@ -50,16 +50,19 @@
 #define OSC_FREQ                                 19200000   // crystal frequency
 
 /* 3 colors, 8 bits per byte, 3 symbols per bit + 55uS low for reset signal */
-#define LED_RESET_uS                             55
-#define LED_BIT_COUNT(leds, freq)                ((leds * 3 * 8 * 3) + ((LED_RESET_uS * \
-                                                  (freq * 3)) / 1000000))
+#define SYMBOL_SIZE                              6
+#define LED_RESET_PRE_uS                         200
+#define LED_RESET_POST_uS                        150
+#define LED_BIT_COUNT(leds, freq)                ((leds * 3 * 8 * SYMBOL_SIZE) + (((LED_RESET_PRE_uS + LED_RESET_POST_uS) * \
+                                                  (freq * SYMBOL_SIZE)) / 1000000))
+#define STARTWORD(freq)                          (((LED_RESET_PRE_uS * freq * SYMBOL_SIZE / 1000000) / sizeof(uint32_t) / 8) * RPI_PWM_CHANNELS)
 
 // Pad out to the nearest uint32 + 32-bits for idle low/high times the number of channels
 #define PWM_BYTE_COUNT(leds, freq)               (((((LED_BIT_COUNT(leds, freq) >> 3) & ~0x7) + 4) + 4) * \
                                                   RPI_PWM_CHANNELS)
 
-#define SYMBOL_HIGH                              0x6  // 1 1 0
-#define SYMBOL_LOW                               0x4  // 1 0 0
+#define SYMBOL_HIGH                              0b110000
+#define SYMBOL_LOW                               0b100000
 
 #define ARRAY_SIZE(stuff)                        (sizeof(stuff) / sizeof(stuff[0]))
 
@@ -323,7 +326,7 @@ static int setup_pwm(ws2811_t *ws2811)
     stop_pwm(ws2811);
 
     // Setup the PWM Clock - Use OSC @ 19.2Mhz w/ 3 clocks/tick
-    cm_pwm->div = CM_PWM_DIV_PASSWD | CM_PWM_DIV_DIVI(OSC_FREQ / (3 * freq));
+    cm_pwm->div = CM_PWM_DIV_PASSWD | CM_PWM_DIV_DIVI(OSC_FREQ / (SYMBOL_SIZE * freq));
     cm_pwm->ctl = CM_PWM_CTL_PASSWD | CM_PWM_CTL_SRC_OSC;
     cm_pwm->ctl = CM_PWM_CTL_PASSWD | CM_PWM_CTL_SRC_OSC | CM_PWM_CTL_ENAB;
     usleep(10);
@@ -689,7 +692,7 @@ int ws2811_render(ws2811_t *ws2811)
     for (chan = 0; chan < RPI_PWM_CHANNELS; chan++)         // Channel
     {
         ws2811_channel_t *channel = &ws2811->channel[chan];
-        int wordpos = chan;
+        int wordpos = STARTWORD(ws2811->freq) + chan;
         int scale   = (channel->brightness & 0xff) + 1;
 
         for (i = 0; i < channel->count; i++)                // Led
@@ -714,10 +717,10 @@ int ws2811_render(ws2811_t *ws2811)
 
                     if (channel->invert)
                     {
-                        symbol = ~symbol & 0x7;
+                        symbol = ~symbol;
                     }
 
-                    for (l = 2; l >= 0; l--)               // Symbol
+                    for (l = SYMBOL_SIZE-1; l >= 0; l--)               // Symbol
                     {
                         uint32_t *wordptr = &((uint32_t *)pwm_raw)[wordpos];
 
