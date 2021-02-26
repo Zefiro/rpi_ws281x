@@ -58,27 +58,35 @@
 #define OSC_FREQ                                 19200000   // crystal frequency
 #define OSC_FREQ_PI4                             54000000   // Pi 4 crystal frequency
 
+#define SYMBOL_SIZE                              6
+
 /* 4 colors (R, G, B + W), 8 bits per byte, 3 symbols per bit + 55uS low for reset signal */
 #define LED_COLOURS                              4
-#define LED_RESET_uS                             55
-#define LED_BIT_COUNT(leds, freq)                ((leds * LED_COLOURS * 8 * 3) + ((LED_RESET_uS * \
-                                                  (freq * 3)) / 1000000))
+#define LED_RESET_PRE_uS                         200
+#define LED_RESET_POST_uS                        150
+#define LED_BIT_COUNT(leds, freq, symbol_size)   ((leds * LED_COLOURS * 8 * symbol_size) + (((LED_RESET_PRE_uS + LED_RESET_POST_uS) * \
+                                                  (freq * symbol_size)) / 1000000))
+#define STARTWORD(freq, symbol_size)             (((LED_RESET_PRE_uS * freq * symbol_size / 1000000) / sizeof(uint32_t) / 8) * RPI_PWM_CHANNELS)
 
 /* Minimum time to wait for reset to occur in microseconds. */
 #define LED_RESET_WAIT_TIME                      300
 
 // Pad out to the nearest uint32 + 32-bits for idle low/high times the number of channels
-#define PWM_BYTE_COUNT(leds, freq)               (((((LED_BIT_COUNT(leds, freq) >> 3) & ~0x7) + 4) + 4) * \
+#define PWM_BYTE_COUNT(leds, freq, symbol_size) (((((LED_BIT_COUNT(leds, freq, symbol_size) >> 3) & ~0x7) + 4) + 4) * \
                                                   RPI_PWM_CHANNELS)
-#define PCM_BYTE_COUNT(leds, freq)               ((((LED_BIT_COUNT(leds, freq) >> 3) & ~0x7) + 4) + 4)
+#define PCM_BYTE_COUNT(leds, freq, symbol_size) ((((LED_BIT_COUNT(leds, freq, symbol_size) >> 3) & ~0x7) + 4) + 4)
 
 // Symbol definitions
-#define SYMBOL_HIGH                              0x6  // 1 1 0
-#define SYMBOL_LOW                               0x4  // 1 0 0
+//#define SYMBOL_HIGH                              0x6  // 1 1 0
+//#define SYMBOL_LOW                               0x4  // 1 0 0
+#define SYMBOL_HIGH                              0b110000
+#define SYMBOL_LOW                               0b100000
 
 // Symbol definitions for software inversion (PCM and SPI only)
-#define SYMBOL_HIGH_INV                          0x1  // 0 0 1
-#define SYMBOL_LOW_INV                           0x3  // 0 1 1
+//#define SYMBOL_HIGH_INV                          0x1  // 0 0 1
+//#define SYMBOL_LOW_INV                           0x3  // 0 1 1
+#define SYMBOL_HIGH_INV                          0b001111
+#define SYMBOL_LOW_INV                           0b011111
 
 // Driver mode definitions
 #define NONE	0
@@ -359,7 +367,7 @@ static int setup_pwm(ws2811_t *ws2811)
     stop_pwm(ws2811);
 
     // Setup the Clock - Use OSC @ 19.2Mhz w/ 3 clocks/tick
-    cm_clk->div = CM_CLK_DIV_PASSWD | CM_CLK_DIV_DIVI(osc_freq / (3 * freq));
+    cm_clk->div = CM_CLK_DIV_PASSWD | CM_CLK_DIV_DIVI(osc_freq / (SYMBOL_SIZE * freq));
     cm_clk->ctl = CM_CLK_CTL_PASSWD | CM_CLK_CTL_SRC_OSC;
     cm_clk->ctl = CM_CLK_CTL_PASSWD | CM_CLK_CTL_SRC_OSC | CM_CLK_CTL_ENAB;
     usleep(10);
@@ -392,7 +400,7 @@ static int setup_pwm(ws2811_t *ws2811)
     pwm->ctl |= RPI_PWM_CTL_PWEN1 | RPI_PWM_CTL_PWEN2;
 
     // Initialize the DMA control block
-    byte_count = PWM_BYTE_COUNT(maxcount, freq);
+    byte_count = PWM_BYTE_COUNT(maxcount, freq, SYMBOL_SIZE);
     dma_cb->ti = RPI_DMA_TI_NO_WIDE_BURSTS |  // 32-bit transfers
                  RPI_DMA_TI_WAIT_RESP |       // wait for write complete
                  RPI_DMA_TI_DEST_DREQ |       // user peripheral flow control
@@ -442,7 +450,7 @@ static int setup_pcm(ws2811_t *ws2811)
     stop_pcm(ws2811);
 
     // Setup the PCM Clock - Use OSC @ 19.2Mhz w/ 3 clocks/tick
-    cm_clk->div = CM_CLK_DIV_PASSWD | CM_CLK_DIV_DIVI(osc_freq / (3 * freq));
+    cm_clk->div = CM_CLK_DIV_PASSWD | CM_CLK_DIV_DIVI(osc_freq / (SYMBOL_SIZE * freq));
     cm_clk->ctl = CM_CLK_CTL_PASSWD | CM_CLK_CTL_SRC_OSC;
     cm_clk->ctl = CM_CLK_CTL_PASSWD | CM_CLK_CTL_SRC_OSC | CM_CLK_CTL_ENAB;
     usleep(10);
@@ -466,7 +474,7 @@ static int setup_pcm(ws2811_t *ws2811)
     pcm->dreq = (RPI_PCM_DREQ_TX(0x3F) | RPI_PCM_DREQ_TX_PANIC(0x10)); // Set FIFO tresholds
 
     // Initialize the DMA control block
-    byte_count = PCM_BYTE_COUNT(maxcount, freq);
+    byte_count = PCM_BYTE_COUNT(maxcount, freq, SYMBOL_SIZE);
     dma_cb->ti = RPI_DMA_TI_NO_WIDE_BURSTS |  // 32-bit transfers
                  RPI_DMA_TI_WAIT_RESP |       // wait for write complete
                  RPI_DMA_TI_DEST_DREQ |       // user peripheral flow control
@@ -575,7 +583,7 @@ void pwm_raw_init(ws2811_t *ws2811)
 {
     volatile uint32_t *pxl_raw = (uint32_t *)ws2811->device->pxl_raw;
     int maxcount = ws2811->device->max_count;
-    int wordcount = (PWM_BYTE_COUNT(maxcount, ws2811->freq) / sizeof(uint32_t)) /
+    int wordcount = (PWM_BYTE_COUNT(maxcount, ws2811->freq, SYMBOL_SIZE) / sizeof(uint32_t)) /
                     RPI_PWM_CHANNELS;
     int chan;
 
@@ -603,7 +611,7 @@ void pcm_raw_init(ws2811_t *ws2811)
 {
     volatile uint32_t *pxl_raw = (uint32_t *)ws2811->device->pxl_raw;
     int maxcount = ws2811->device->max_count;
-    int wordcount = PCM_BYTE_COUNT(maxcount, ws2811->freq) / sizeof(uint32_t);
+    int wordcount = PCM_BYTE_COUNT(maxcount, ws2811->freq, SYMBOL_SIZE) / sizeof(uint32_t);
     int i;
 
     for (i = 0; i < wordcount; i++)
@@ -845,7 +853,7 @@ static ws2811_return_t spi_init(ws2811_t *ws2811)
     channel->bshift = (channel->strip_type >> 0)  & 0xff;
 
     // Allocate SPI transmit buffer (same size as PCM)
-    device->pxl_raw = malloc(PCM_BYTE_COUNT(device->max_count, ws2811->freq));
+    device->pxl_raw = malloc(PCM_BYTE_COUNT(device->max_count, ws2811->freq, SYMBOL_SIZE));
     if (device->pxl_raw == NULL)
     {
         ws2811_cleanup(ws2811);
@@ -864,7 +872,7 @@ static ws2811_return_t spi_transfer(ws2811_t *ws2811)
     memset(&tr, 0, sizeof(struct spi_ioc_transfer));
     tr.tx_buf = (unsigned long)ws2811->device->pxl_raw;
     tr.rx_buf = 0;
-    tr.len = PCM_BYTE_COUNT(ws2811->device->max_count, ws2811->freq);
+    tr.len = PCM_BYTE_COUNT(ws2811->device->max_count, ws2811->freq, SYMBOL_SIZE);
 
     ret = ioctl(ws2811->device->spi_fd, SPI_IOC_MESSAGE(1), &tr);
     if (ret < 1)
@@ -926,12 +934,12 @@ ws2811_return_t ws2811_init(ws2811_t *ws2811)
     // Determine how much physical memory we need for DMA
     switch (device->driver_mode) {
     case PWM:
-        device->mbox.size = PWM_BYTE_COUNT(device->max_count, ws2811->freq) +
+        device->mbox.size = PWM_BYTE_COUNT(device->max_count, ws2811->freq, SYMBOL_SIZE) +
                             sizeof(dma_cb_t);
         break;
 
     case PCM:
-        device->mbox.size = PCM_BYTE_COUNT(device->max_count, ws2811->freq) +
+        device->mbox.size = PCM_BYTE_COUNT(device->max_count, ws2811->freq, SYMBOL_SIZE) +
                             sizeof(dma_cb_t);
         break;
     }
@@ -1152,7 +1160,7 @@ ws2811_return_t  ws2811_render(ws2811_t *ws2811)
     {
         ws2811_channel_t *channel = &ws2811->channel[chan];
 
-        int wordpos = chan; // PWM & PCM
+        int wordpos = STARTWORD(ws2811->freq, SYMBOL_SIZE) + chan; // PWM & PCM
         int bytepos = 0;    // SPI
         const int scale = (channel->brightness & 0xff) + 1;
         uint8_t array_size = 3; // Assume 3 color LEDs, RGB
@@ -1196,7 +1204,7 @@ ws2811_return_t  ws2811_render(ws2811_t *ws2811)
                         if ((driver_mode != PWM) && channel->invert) symbol = SYMBOL_HIGH_INV;
                     }
 
-                    for (l = 2; l >= 0; l--)               // Symbol
+                    for (l = SYMBOL_SIZE-1; l >= 0; l--)               // Symbol
                     {
                         uint32_t *wordptr = &((uint32_t *)pxl_raw)[wordpos];   // PWM & PCM
                         volatile uint8_t  *byteptr = &pxl_raw[bytepos];    // SPI
